@@ -16,10 +16,28 @@ export interface MetaWebhookPayload {
       message?: {
         mid: string;
         text?: string;
+        quick_reply?: { payload: string };
         attachments?: any[];
       };
+      postback?: {
+        title: string;
+        payload: string;
+        mid?: string;
+      };
+      read?: {
+        watermark: number;
+      };
+      reaction?: {
+        mid: string;
+        action: 'react' | 'unreact';
+        reaction?: string;
+        emoji?: string;
+      };
       delivery?: any;
-      read?: any;
+    }>;
+    changes?: Array<{
+      field: string;
+      value: any;
     }>;
   }>;
 }
@@ -27,35 +45,100 @@ export interface MetaWebhookPayload {
 export class InstagramIntegration {
   /**
    * Step 1: Webhook Handshake Verification (Meta Hub Challenge)
+   * GET /api/instagram/webhook?hub.mode=subscribe&hub.challenge=...&hub.verify_token=...
    */
   static verifyWebhook(mode?: string, token?: string, challenge?: string): { success: boolean; challenge?: string; error?: string } {
     const systemSettings = db.getSystemSettings();
-    const expectedToken = process.env.INSTAGRAM_VERIFY_TOKEN || systemSettings.instagram_verify_token;
+    const expectedToken = (process.env.INSTAGRAM_VERIFY_TOKEN || systemSettings.instagram_verify_token || '').trim();
+    const receivedToken = (token || '').trim();
 
-    if (mode === 'subscribe' && token === expectedToken) {
+    if (mode === 'subscribe' && receivedToken && receivedToken === expectedToken) {
+      db.markWebhookVerified();
       db.addLog({
         event_type: 'webhook_received',
         status: 'success',
-        details: { mode, verified: true, timestamp: new Date().toISOString() }
+        details: { 
+          mode, 
+          verified: true, 
+          timestamp: new Date().toISOString(),
+          info: 'تم التحقق من Webhook بنجاح من قبل Meta Hub Challenge'
+        }
       });
       return { success: true, challenge };
     }
+
+    const reason = mode !== 'subscribe'
+      ? `نوع الطلب غير صحيح: ${mode || 'غير محدد'}`
+      : `رمز التحقق غير مطابق. الرمز المتوقع يبدأ بـ (${expectedToken.slice(0, 4)}***)`;
 
     db.addLog({
       event_type: 'error',
       status: 'error',
       details: {
-        reason: 'فشل التحقق من Webhook Token',
-        received_token: token ? `${token.substring(0, 4)}***` : 'none',
-        expected_token: `${expectedToken.substring(0, 4)}***`
+        reason,
+        received_mode: mode,
+        received_token: receivedToken ? `${receivedToken.slice(0, 4)}***` : 'none',
+        expected_token: expectedToken ? `${expectedToken.slice(0, 4)}***` : 'none'
       }
     });
 
-    return { success: false, error: 'Verification token mismatch or invalid mode' };
+    return { success: false, error: reason };
   }
 
   /**
-   * Step 2: Full Automation Pipeline for incoming message
+   * Step 2: Verify X-Hub-Signature-256 for POST requests using raw Buffer
+   */
+  static verifySignature(rawBody: Buffer | string | undefined, signatureHeader: string | undefined): boolean {
+    const appSecret = process.env.META_APP_SECRET;
+    // If META_APP_SECRET is not configured by the admin yet, allow processing and log warning
+    if (!appSecret || !appSecret.trim()) {
+      return true;
+    }
+
+    if (!signatureHeader || !rawBody) {
+      db.addLog({
+        event_type: 'guardrail_blocked',
+        status: 'error',
+        details: { reason: 'طلب POST مفقود لترويسة X-Hub-Signature-256' }
+      });
+      return false;
+    }
+
+    const parts = signatureHeader.split('=');
+    const signature = parts[1];
+    if (parts[0] !== 'sha256' || !signature) {
+      return false;
+    }
+
+    try {
+      const hmac = crypto.createHmac('sha256', appSecret.trim());
+      hmac.update(rawBody);
+      const expectedSignature = hmac.digest('hex');
+
+      const sigBuffer = Buffer.from(signature, 'hex');
+      const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+
+      if (sigBuffer.length !== expectedBuffer.length) {
+        return false;
+      }
+
+      const isValid = crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+      if (!isValid) {
+        db.addLog({
+          event_type: 'guardrail_blocked',
+          status: 'error',
+          details: { reason: 'فشل تطابق توقيع X-Hub-Signature-256 مع META_APP_SECRET' }
+        });
+      }
+      return isValid;
+    } catch (err: any) {
+      console.error('Error verifying X-Hub-Signature-256:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Step 3: Full Automation Pipeline for incoming message / user interaction
    */
   static async processIncomingMessage(
     senderId: string,
@@ -70,7 +153,7 @@ export class InstagramIntegration {
     reason?: string;
   }> {
     const startTime = Date.now();
-    const cleanMid = messageMid || `sim_mid_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const cleanMid = messageMid || `mid_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     // 1. Duplicate event prevention
     if (db.isDuplicateWebhook(cleanMid)) {
@@ -94,13 +177,15 @@ export class InstagramIntegration {
     let username = providedUsername || (customer ? customer.instagram_username : `user_${senderId.slice(-6)}`);
 
     // Attempt to fetch profile info from Meta Graph API if access token is available
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN || db.getSystemSettings().instagram_access_token;
-    if (!customer && accessToken && !providedUsername) {
+    let fetchedName: string | undefined = undefined;
+    const accessToken = process.env.META_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN || db.getSystemSettings().instagram_access_token;
+    if (!customer && accessToken && !providedUsername && !senderId.startsWith('sim_') && !senderId.startsWith('test_')) {
       try {
         const metaProfileRes = await fetch(`https://graph.facebook.com/v21.0/${senderId}?fields=name,username&access_token=${accessToken}`);
         if (metaProfileRes.ok) {
-          const profileData = await metaProfileRes.json();
+          const profileData: any = await metaProfileRes.json();
           if (profileData.username) username = profileData.username;
+          if (profileData.name) fetchedName = profileData.name;
         }
       } catch (err) {
         console.warn('Could not fetch Meta profile for sender, using fallback username:', err);
@@ -112,6 +197,7 @@ export class InstagramIntegration {
         id: crypto.randomUUID(),
         instagram_username: username,
         instagram_user_id: senderId,
+        name: fetchedName,
         first_contact_at: new Date().toISOString(),
         last_contact_at: new Date().toISOString(),
         lead_status: 'New',
@@ -217,7 +303,6 @@ export class InstagramIntegration {
         details: { violations: validation.violations, action: 'حظر الرد وتفعيل التنبيه' }
       });
 
-      // Update customer state safely without sending invalid response
       customer.lead_status = 'Waiting';
       db.saveCustomer(customer);
 
@@ -293,7 +378,9 @@ export class InstagramIntegration {
       lead_score: analysis.lead_score,
       response_time_ms: responseTime,
       details: {
-        delivery: sendResult.simulated ? 'محاكاة بيئة الاختبار (بدون رمز وصول ميتا نشط)' : 'تم الإرسال عبر Meta Graph API',
+        delivery: sendResult.simulated 
+          ? 'محاكاة بيئة الاختبار (بدون رمز وصول ميتا نشط)' 
+          : sendResult.success ? 'تم الإرسال بنجاح عبر Meta Graph API' : `فشل الإرسال: ${sendResult.error}`,
         confidence: analysis.confidence,
         missing_info: analysis.missing_info
       }
@@ -308,20 +395,29 @@ export class InstagramIntegration {
   }
 
   /**
-   * Step 3: Send message to Meta Instagram Graph API
+   * Step 4: Send message to Meta Instagram Graph API
    */
   static async sendInstagramMessage(
     recipientId: string,
     text: string
   ): Promise<{ success: boolean; simulated?: boolean; messageId?: string; error?: string }> {
-    const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN || db.getSystemSettings().instagram_access_token;
+    const accessToken = process.env.META_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN || db.getSystemSettings().instagram_access_token;
 
-    // If no access token is configured, or if recipient is a simulated test user
-    if (!accessToken || recipientId.startsWith('sim_') || recipientId.startsWith('test_')) {
+    // Check if recipient is a simulated test user
+    if (recipientId.startsWith('sim_') || recipientId.startsWith('test_')) {
       return {
         success: true,
         simulated: true,
         messageId: `sim_out_${Date.now()}`
+      };
+    }
+
+    // If no access token is configured
+    if (!accessToken || !accessToken.trim()) {
+      return {
+        success: false,
+        simulated: true,
+        error: 'لم يتم إعداد META_ACCESS_TOKEN في إعدادات البيئة (Production Mode Requires Meta Access Token)'
       };
     }
 
@@ -330,7 +426,7 @@ export class InstagramIntegration {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
+          'Authorization': `Bearer ${accessToken.trim()}`
         },
         body: JSON.stringify({
           recipient: { id: recipientId },
@@ -361,25 +457,122 @@ export class InstagramIntegration {
   }
 
   /**
-   * Parse Meta Webhook payload batch
+   * Parse Meta Webhook payload batch supporting all event types:
+   * - messages
+   * - messaging_postbacks
+   * - messaging_seen
+   * - messaging_reactions
+   * - comments
+   * - mentions
    */
   static async handleWebhookPayload(payload: MetaWebhookPayload) {
-    if (payload.object !== 'instagram' && payload.object !== 'page') {
+    if (!payload || (payload.object !== 'instagram' && payload.object !== 'page')) {
       return { processedCount: 0, reason: 'Not an instagram/page event' };
     }
 
     let processedCount = 0;
     if (payload.entry && Array.isArray(payload.entry)) {
       for (const entry of payload.entry) {
+        // 1. Process messaging events
         if (entry.messaging && Array.isArray(entry.messaging)) {
           for (const msgEvent of entry.messaging) {
-            // Only process incoming text messages from customer
-            if (msgEvent.message && msgEvent.message.text && msgEvent.sender && msgEvent.sender.id) {
-              await this.processIncomingMessage(
-                msgEvent.sender.id,
-                msgEvent.message.text,
-                msgEvent.message.mid
-              );
+            const senderId = msgEvent.sender?.id;
+            if (!senderId) continue;
+
+            // (A) Text message or Quick Reply
+            if (msgEvent.message) {
+              const text = msgEvent.message.text || msgEvent.message.quick_reply?.payload;
+              if (text && text.trim()) {
+                await this.processIncomingMessage(
+                  senderId,
+                  text.trim(),
+                  msgEvent.message.mid
+                );
+                processedCount++;
+              }
+            }
+
+            // (B) Postback event (e.g. user clicked a persistent menu or template button)
+            else if (msgEvent.postback) {
+              const text = msgEvent.postback.title || msgEvent.postback.payload;
+              if (text && text.trim()) {
+                await this.processIncomingMessage(
+                  senderId,
+                  text.trim(),
+                  msgEvent.postback.mid
+                );
+                processedCount++;
+              }
+            }
+
+            // (C) Seen / Read Receipt
+            else if (msgEvent.read) {
+              db.addLog({
+                event_type: 'webhook_received',
+                status: 'success',
+                details: {
+                  event: 'messaging_seen',
+                  senderId,
+                  watermark: msgEvent.read.watermark
+                }
+              });
+              processedCount++;
+            }
+
+            // (D) Reaction event
+            else if (msgEvent.reaction) {
+              db.addLog({
+                event_type: 'webhook_received',
+                status: 'success',
+                details: {
+                  event: 'messaging_reactions',
+                  senderId,
+                  reaction: msgEvent.reaction.reaction || msgEvent.reaction.emoji,
+                  action: msgEvent.reaction.action,
+                  mid: msgEvent.reaction.mid
+                }
+              });
+              processedCount++;
+            }
+          }
+        }
+
+        // 2. Process changes events (Comments & Mentions)
+        if (entry.changes && Array.isArray(entry.changes)) {
+          for (const change of entry.changes) {
+            if (change.field === 'comments') {
+              db.addLog({
+                event_type: 'webhook_received',
+                status: 'success',
+                details: {
+                  event: 'comments',
+                  comment_id: change.value?.id,
+                  text: change.value?.text,
+                  from: change.value?.from?.username || change.value?.from?.id
+                }
+              });
+              processedCount++;
+            } else if (change.field === 'mentions') {
+              db.addLog({
+                event_type: 'webhook_received',
+                status: 'success',
+                details: {
+                  event: 'mentions',
+                  media_id: change.value?.media_id,
+                  comment_id: change.value?.comment_id
+                }
+              });
+              processedCount++;
+            } else {
+              // Extensible for any future Meta event fields
+              db.addLog({
+                event_type: 'webhook_received',
+                status: 'success',
+                details: {
+                  event: change.field,
+                  value: change.value
+                }
+              });
               processedCount++;
             }
           }

@@ -83,10 +83,15 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   id: 'vexora-system-default',
   brand_name: 'Vexora',
   instagram_verify_token: process.env.INSTAGRAM_VERIFY_TOKEN || 'vexora_secure_webhook_token_2026',
-  instagram_page_id: process.env.INSTAGRAM_PAGE_ID || '',
-  instagram_access_token_configured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN),
+  instagram_page_id: process.env.INSTAGRAM_ACCOUNT_ID || process.env.INSTAGRAM_PAGE_ID || '',
+  instagram_account_id: process.env.INSTAGRAM_ACCOUNT_ID || process.env.INSTAGRAM_PAGE_ID || '',
+  meta_app_id: process.env.META_APP_ID || '',
+  meta_app_secret_configured: Boolean(process.env.META_APP_SECRET),
+  instagram_access_token_configured: Boolean(process.env.META_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN),
+  meta_webhook_verified: false,
+  webhook_status: 'disconnected',
   instagram_mode: 'live',
-  webhook_url: '/api/webhook/instagram',
+  webhook_url: '/api/instagram/webhook',
   supabase_configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
   updated_at: new Date().toISOString()
 };
@@ -492,12 +497,32 @@ export class Database {
       this.saveState();
     }
     current.instagram_access_token_configured = Boolean(
-      process.env.INSTAGRAM_ACCESS_TOKEN || current.instagram_access_token
+      process.env.META_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN || current.instagram_access_token
     );
+    current.meta_app_secret_configured = Boolean(process.env.META_APP_SECRET);
+    current.meta_app_id = process.env.META_APP_ID || current.meta_app_id || '';
+    current.instagram_account_id = process.env.INSTAGRAM_ACCOUNT_ID || process.env.INSTAGRAM_PAGE_ID || current.instagram_account_id || '';
     current.supabase_configured = Boolean(
       process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
     );
+
+    // Calculate real status
+    if (this.state.system_settings.meta_webhook_verified) {
+      current.webhook_status = 'verified';
+    } else if (current.webhook_status === 'ready_for_verification') {
+      current.webhook_status = 'ready_for_verification';
+    } else {
+      current.webhook_status = 'disconnected';
+    }
+
     return current;
+  }
+
+  markWebhookVerified(timestamp?: string): void {
+    this.state.system_settings.meta_webhook_verified = true;
+    this.state.system_settings.webhook_status = 'verified';
+    this.state.system_settings.last_webhook_received_at = timestamp || new Date().toISOString();
+    this.saveState();
   }
 
   generateVerifyToken(): string {

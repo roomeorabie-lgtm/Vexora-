@@ -120,8 +120,14 @@ export interface SystemSettings {
   brand_name: string;
   instagram_verify_token: string;
   instagram_page_id?: string;
+  instagram_account_id?: string;
+  meta_app_id?: string;
+  meta_app_secret_configured: boolean;
   instagram_access_token?: string; // Masked on client
   instagram_access_token_configured: boolean;
+  meta_webhook_verified: boolean;
+  webhook_status: 'disconnected' | 'ready_for_verification' | 'verified';
+  last_webhook_received_at?: string;
   instagram_mode: 'live' | 'sandbox';
   webhook_url?: string;
   supabase_configured: boolean;

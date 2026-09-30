@@ -21,11 +21,13 @@ export const DeploymentGuideView: React.FC = () => {
     setTimeout(() => setCopiedItem(null), 2000);
   };
 
-  const envSample = `# المتغيرات البيئية لـ Vexora AI Automation
+  const envSample = `# المتغيرات البيئية لـ Vexora AI Automation في Vercel
 GEMINI_API_KEY="AIzaSy..." # مفتاح Gemini من Google AI Studio
 INSTAGRAM_VERIFY_TOKEN="vexora_secure_webhook_token_2026" # رمز التحقق الذي تضعه في Meta Webhook
-INSTAGRAM_PAGE_ID="YOUR_INSTAGRAM_PAGE_ID" # معرف صفحة إنستغرام للأعمال
-INSTAGRAM_ACCESS_TOKEN="EAA..." # توكن الوصول الدائم من Meta Graph API
+META_APP_SECRET="abc123..." # سري التطبيق للتحقق من X-Hub-Signature-256
+META_ACCESS_TOKEN="EAA..." # توكن وصول إنستغرام الدائم للردود
+INSTAGRAM_ACCOUNT_ID="1784..." # معرف حساب إنستغرام للأعمال
+META_APP_ID="987..." # معرف تطبيق Meta
 SUPABASE_URL="https://your-project.supabase.co" # رابط Supabase (اختياري)
 SUPABASE_SERVICE_ROLE_KEY="eyJ..." # مفتاح الخدمة السري لـ Supabase (اختياري)
 PORT=3000
@@ -227,8 +229,8 @@ CREATE TABLE IF NOT EXISTS offers (
               3. ادخل على <strong>Webhooks</strong> ثم <strong>Instagram</strong> واضغط <strong>Edit Subscription</strong>:
             </p>
             <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1 text-slate-400 font-mono text-[11px]">
-              <div>Callback URL: <span className="text-indigo-300">{window.location.origin}/api/webhook/instagram</span></div>
-              <div>Verify Token: <span className="text-indigo-300">vexora_secure_webhook_token_2026</span> (أو الرمز الذي تخصصه)</div>
+              <div>Callback URL: <span className="text-indigo-300 font-bold">https://vexora-x.vercel.app/api/instagram/webhook</span></div>
+              <div>Verify Token: <span className="text-emerald-300 font-bold">vexora_secure_webhook_token_2026</span> (أو الرمز من لوحة التحكم)</div>
             </div>
             <p>
               4. اضغط <strong>Verify and Save</strong>، ثم ضع علامة صح بجوار <strong>messages</strong> لتستقبل الرسائل النصية.
@@ -245,26 +247,25 @@ CREATE TABLE IF NOT EXISTS offers (
             <span className="w-6 h-6 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-bold text-xs">
               5
             </span>
-            نشر المشروع على Vercel أو Cloud Run (Production)
+            نشر المشروع على Vercel (Production Serverless)
           </h3>
           <div className="space-y-2 text-slate-300 leading-relaxed">
             <p>
-              1. ارفع المشروع إلى حسابك على <strong>GitHub</strong>.
+              1. تأكد من وجود ملف <code>vercel.json</code> ومجلد <code>api/instagram/webhook.ts</code> المرفقين بالمشروع لدعم وظائف Serverless.
             </p>
             <p>
-              2. افتح <strong>Vercel.com</strong> واضغط <strong>Add New Project</strong> واختر المستودع.
-            </p>
-            <p>
-              3. في تبويب <strong>Environment Variables</strong> أضف:
+              2. في لوحة تحكم مشروعك في <strong>Vercel (Settings &gt; Environment Variables)</strong> أضف:
             </p>
             <ul className="list-disc list-inside space-y-0.5 text-slate-400 font-mono">
               <li>GEMINI_API_KEY</li>
               <li>INSTAGRAM_VERIFY_TOKEN</li>
-              <li>INSTAGRAM_ACCESS_TOKEN</li>
-              <li>INSTAGRAM_PAGE_ID</li>
+              <li>META_APP_SECRET</li>
+              <li>META_ACCESS_TOKEN</li>
+              <li>INSTAGRAM_ACCOUNT_ID</li>
+              <li>META_APP_ID</li>
             </ul>
             <p>
-              4. اضغط <strong>Deploy</strong>، وبمجرد اكتمال النشر، انسخ الدومين الجديد وضعه كـ Callback URL في Meta Webhooks.
+              3. بعد الـ Redeploy، يصبح الرابط <code>https://vexora-x.vercel.app/api/instagram/webhook</code> نشطاً ومستعداً لمصادقة Meta الفورية.
             </p>
           </div>
         </div>

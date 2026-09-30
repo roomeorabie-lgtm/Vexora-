@@ -14,7 +14,9 @@ import {
   Sparkles,
   HelpCircle,
   Play,
-  Check
+  Check,
+  XCircle,
+  AlertTriangle
 } from 'lucide-react';
 import { api } from '../services/api.ts';
 import type { SystemSettings } from '../types/index.ts';
@@ -29,24 +31,41 @@ export const InstagramSetupView: React.FC = () => {
 
   // Form fields
   const [verifyToken, setVerifyToken] = useState('vexora_secure_webhook_token_2026');
-  const [pageId, setPageId] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [appId, setAppId] = useState('');
+  const [accountId, setAccountId] = useState('');
   const [accessToken, setAccessToken] = useState('');
-  const [customDomain, setCustomDomain] = useState('');
 
-  // Webhook live handshake test state
+  // Selected Host: default to Vercel production as requested by user
+  const [selectedHostType, setSelectedHostType] = useState<'vercel' | 'current'>('vercel');
+  const vercelBase = 'https://vexora-x.vercel.app';
+  const currentBase = window.location.origin;
+  const activeBaseUrl = selectedHostType === 'vercel' ? vercelBase : currentBase;
+  const webhookCallbackUrl = `${activeBaseUrl}/api/instagram/webhook`;
+
+  // Webhook live ping test state
   const [testingWebhook, setTestingWebhook] = useState(false);
-  const [webhookTestResult, setWebhookTestResult] = useState<any>(null);
+  const [pingResult, setPingResult] = useState<{
+    status: 'idle' | 'success' | 'failed';
+    message: string;
+    details?: string;
+    httpCode?: number;
+  }>({ status: 'idle', message: '' });
+
+  // Webhook display status
+  const [localTestedReady, setLocalTestedReady] = useState(false);
 
   const loadSettings = async () => {
     try {
       setLoading(true);
       const data = await api.getSystemSettings();
       setSettings(data);
-      const activeToken = data.instagram_verify_token && data.instagram_verify_token.trim()
+      const activeToken = (data.instagram_verify_token && data.instagram_verify_token.trim())
         ? data.instagram_verify_token
         : 'vexora_secure_webhook_token_2026';
       setVerifyToken(activeToken);
-      setPageId(data.instagram_page_id || '');
+      setAccountId(data.instagram_account_id || data.instagram_page_id || '');
+      setAppId(data.meta_app_id || '');
     } catch (err) {
       console.error('Failed to load settings:', err);
     } finally {
@@ -88,38 +107,96 @@ export const InstagramSetupView: React.FC = () => {
     try {
       const payload: Partial<SystemSettings> = {
         instagram_verify_token: verifyToken.trim() || 'vexora_secure_webhook_token_2026',
-        instagram_page_id: pageId
+        instagram_account_id: accountId.trim(),
+        instagram_page_id: accountId.trim(),
+        meta_app_id: appId.trim()
       };
       if (accessToken && !accessToken.includes('••••')) {
-        payload.instagram_access_token = accessToken;
+        payload.instagram_access_token = accessToken.trim();
       }
       const updated = await api.updateSystemSettings(payload);
       setSettings(updated);
-      setSuccessMsg('تم حفظ إعدادات الربط بنجاح!');
+      setSuccessMsg('تم حفظ بيانات الربط بنجاح في السيرفر!');
       setTimeout(() => setSuccessMsg(null), 3000);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to save settings:', err);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleTestWebhookHandshake = async () => {
+  /**
+   * Real Webhook Ping Tester:
+   * Performs an actual HTTP GET to /api/instagram/webhook using Meta's exact handshake:
+   * ?hub.mode=subscribe&hub.verify_token=VERIFY_TOKEN&hub.challenge=TEST_CHALLENGE
+   */
+  const handleTestWebhookLive = async () => {
     setTestingWebhook(true);
-    setWebhookTestResult(null);
+    setPingResult({ status: 'idle', message: '' });
+
+    const testChallenge = `challenge_${Math.floor(100000 + Math.random() * 900000)}`;
+    const testUrl = `${activeBaseUrl}/api/instagram/webhook?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(verifyToken.trim())}&hub.challenge=${testChallenge}`;
+
     try {
-      const res = await api.testWebhookHandshake(verifyToken);
-      setWebhookTestResult(res);
+      const response = await fetch(testUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'text/plain' }
+      });
+
+      const bodyText = await response.text();
+
+      if (response.status === 200 && bodyText.trim() === testChallenge) {
+        setPingResult({
+          status: 'success',
+          httpCode: 200,
+          message: '✅ Webhook يعمل بنجاح! السيرفر رد بـ HTTP 200 وبنفس قيمة الـ Challenge النصية، وهو متوافق تماماً مع Meta.',
+          details: `تم استقبال Challenge: ${bodyText.trim()}`
+        });
+        setLocalTestedReady(true);
+      } else if (response.status === 403) {
+        setPingResult({
+          status: 'failed',
+          httpCode: 403,
+          message: '❌ Verify Token غير مطابق: السيرفر رفض الرمز بـ HTTP 403 لأن الرمز المرسل لا يطابق المسجل.',
+          details: `Response: ${bodyText}`
+        });
+      } else if (response.status === 404) {
+        setPingResult({
+          status: 'failed',
+          httpCode: 404,
+          message: '❌ Endpoint غير موجود (HTTP 404): المسار غير مفعل أو أن منصة الاستضافة لم تنشر مسار /api/instagram/webhook.',
+          details: `URL: ${testUrl}`
+        });
+      } else if (bodyText.includes('<!doctype html>') || bodyText.includes('<html')) {
+        setPingResult({
+          status: 'failed',
+          httpCode: response.status,
+          message: '❌ HTTP status غير صحيح: السيرفر أرجع صفحة HTML بدلاً من الـ Challenge النصي (Vercel SPA Fallback).',
+          details: 'تأكد من وجود vercel.json الذي يوجه /api/instagram/webhook إلى Serverless Function.'
+        });
+      } else {
+        setPingResult({
+          status: 'failed',
+          httpCode: response.status,
+          message: `❌ فشل الفحص: كود الحالة HTTP ${response.status}`,
+          details: `استجابة السيرفر: ${bodyText.slice(0, 100)}`
+        });
+      }
     } catch (err: any) {
-      setWebhookTestResult({ success: false, message: err.message || 'فشل الفحص' });
+      setPingResult({
+        status: 'failed',
+        message: `❌ تعذر الاتصال بالرابط (Network Error): ${err.message || 'خطأ في الشبكة'}`,
+        details: testUrl
+      });
     } finally {
       setTestingWebhook(false);
     }
   };
 
-  const currentHost = window.location.origin;
-  const activeBaseUrl = customDomain.trim() ? customDomain.replace(/\/+$/, '') : currentHost;
-  const webhookFullUrl = `${activeBaseUrl}/api/webhook/instagram`;
+  // Determine True Status
+  const isVerifiedByMeta = settings?.meta_webhook_verified === true;
+  const isReady = localTestedReady && !isVerifiedByMeta;
+  const isDisconnected = !isVerifiedByMeta && !isReady;
 
   return (
     <div className="space-y-6">
@@ -128,95 +205,119 @@ export const InstagramSetupView: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Instagram className="w-5 h-5 text-pink-400" />
-            إعداد ربط إنستغرام عبر Meta Graph API الرسمي
+            إعداد ربط إنستغرام وميتا الرسمية (Meta Graph API)
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            دليل إعداد الـ Webhook ورموز التحقق خطوة بخطوة بالواجهات الرسمية لشركة Meta
+            Endpoint متوافق 100% مع Vercel Production و Meta Hub Verification
           </p>
         </div>
 
-        {/* Status Indicator */}
-        <div className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-          settings?.instagram_access_token_configured
-            ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-            : 'bg-amber-500/10 border-amber-500/20 text-amber-400'
-        }`}>
-          <span className={`w-2 h-2 rounded-full ${settings?.instagram_access_token_configured ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
-          <span>{settings?.instagram_access_token_configured ? 'Meta API متصل ونشط' : 'بانتظار إضافة Meta Access Token'}</span>
+        {/* Real Status Badge (No simulation deception) */}
+        <div className="flex items-center gap-2">
+          {isVerifiedByMeta ? (
+            <div className="px-3.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Webhook Status: ● Meta Webhook Verified</span>
+            </div>
+          ) : isReady ? (
+            <div className="px-3.5 py-1.5 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-bold flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-blue-400"></span>
+              <span>Webhook Status: ● جاهز للتحقق من Meta</span>
+            </div>
+          ) : (
+            <div className="px-3.5 py-1.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-bold flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-400"></span>
+              <span>Webhook Status: ● غير متصل</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* CRITICAL EXPLANATION BANNER: What is Verify Token? */}
-      <div className="p-5 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-purple-950/40 to-slate-900 border-2 border-indigo-500/40 shadow-xl space-y-3">
-        <div className="flex items-center gap-2.5 text-indigo-300 font-bold text-sm">
-          <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-400">
-            <HelpCircle className="w-5 h-5" />
-          </div>
-          <span>توضيح هام جداً: ما هو رمز التحقق (Verify Token)؟</span>
+      {/* Clear Separation Notice */}
+      <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-xs text-slate-300 space-y-2">
+        <div className="flex items-center gap-2 text-indigo-400 font-bold text-sm">
+          <ShieldCheck className="w-4 h-4 text-indigo-400" />
+          <span>تكامل إنستغرام الحقيقي (Meta Production API)</span>
         </div>
-
-        <div className="text-xs text-slate-200 leading-relaxed space-y-2">
-          <p>
-            كثير من المستخدمين يعتقدون أن شركة <strong>Meta (فيسبوك)</strong> هي التي ستعطيهم رمز التحقق Verify Token، ولكن في الحقيقة:
-          </p>
-          <div className="p-3 bg-slate-900/80 rounded-xl border border-indigo-500/30 font-medium text-emerald-300">
-            💡 <strong>رمز التحقق (Verify Token) هو كلمة سر خاصة بك أنت</strong> يقوم نظامك بإنشائها لتأمين الـ Webhook الخاص بك، ثم تقوم <strong>أنت بنسخها ولصقها في خانة Verify Token داخل صفحة Meta Developers</strong> ليتأكد فيسبوك أن هذا الموقع يخصك!
-          </div>
-          <p className="text-slate-300">
-            نظامك قام بالفعل بتعيين رمز افتراضي آمن جاهز لك، ويمكنك استخدامه فوراً أو الضغط على زر <strong>"توليد رمز جديد"</strong> ليتم نسخه وتفعيله بضغطة زر واحدة.
-          </p>
-        </div>
+        <p className="text-slate-400 leading-relaxed">
+          هذا المسار مخصص لاستقبال رسائل Instagram Direct الحقيقية من شركة Meta عبر 
+          <code className="text-indigo-300 bg-slate-800 px-1.5 py-0.5 rounded mx-1">/api/instagram/webhook</code>.
+          وضع المحاكاة (Simulation) مفصول تماماً ومخصص للاختبارات الداخلية فقط في اللوحة ولا يتم اعتباره اتصالاً حقيقياً بميتا.
+        </p>
       </div>
 
       {/* Webhook URLs & Verify Token Box */}
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-5">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
           <h3 className="font-bold text-white text-sm flex items-center gap-2">
             <Globe className="w-4 h-4 text-indigo-400" />
-            بيانات الـ Webhook المطلوبة داخل صفحة Meta Developers
+            بيانات الاعتماد المطلوبة داخل Meta Developers
           </h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            جاهز للاستخدام
-          </span>
+
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-slate-400">النطاق المستهدف:</span>
+            <button
+              type="button"
+              onClick={() => setSelectedHostType('vercel')}
+              className={`px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
+                selectedHostType === 'vercel'
+                  ? 'bg-indigo-600 text-white border-indigo-500'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+              }`}
+            >
+              Vercel Production
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedHostType('current')}
+              className={`px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
+                selectedHostType === 'current'
+                  ? 'bg-indigo-600 text-white border-indigo-500'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+              }`}
+            >
+              النطاق الحالي (Dev/Preview)
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          {/* Callback URL */}
+          {/* 1. Callback URL */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <label className="text-slate-300 font-semibold block">
-                1. Callback URL (رابط الـ Webhook المباشر):
+              <label className="text-slate-300 font-bold block">
+                Callback URL (رابط الـ Webhook النهائي):
               </label>
-              <span className="text-[10px] text-slate-500">انسخه وضعه في خانة Callback URL في Meta</span>
+              <span className="text-[10px] text-slate-500">انسخه وضعه في Meta</span>
             </div>
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 readOnly
-                value={webhookFullUrl}
+                value={webhookCallbackUrl}
                 className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white font-mono text-[11px] select-all focus:outline-none"
               />
               <button
                 type="button"
-                onClick={() => handleCopy(webhookFullUrl, 'url')}
-                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-xs flex items-center gap-1.5 shrink-0 shadow-md shadow-indigo-600/20 transition-all"
+                onClick={() => handleCopy(webhookCallbackUrl, 'url')}
+                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0 shadow-md shadow-indigo-600/20 transition-all"
               >
                 {copiedField === 'url' ? <Check className="w-4 h-4 text-white" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedField === 'url' ? 'تم النسخ!' : 'نسخ الرابط'}</span>
+                <span>نسخ Callback URL</span>
               </button>
             </div>
-            <p className="text-[10px] text-slate-400">
-              * إذا قمت بنشر موقعك على دومين خارجي مخصص أو Vercel، يمكنك كتابة الدومين الخاص بك في الأسفل.
+            <p className="text-[11px] text-indigo-300/90 font-mono">
+              GET & POST: {webhookCallbackUrl}
             </p>
           </div>
 
-          {/* Verify Token */}
+          {/* 2. Verify Token */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <label className="text-slate-300 font-semibold block">
-                2. Verify Token (رمز التحقق الخاص بك):
+              <label className="text-slate-300 font-bold block">
+                Verify Token (رمز التحقق الخاص بك):
               </label>
-              <span className="text-[10px] text-emerald-400 font-medium">مفعّل وجاهز</span>
+              <span className="text-[10px] text-emerald-400 font-semibold">مضبوط في السيرفر</span>
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -229,201 +330,189 @@ export const InstagramSetupView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleCopy(verifyToken, 'token')}
-                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs flex items-center gap-1.5 shrink-0 shadow-md shadow-emerald-600/20 transition-all"
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 shrink-0 shadow-md shadow-emerald-600/20 transition-all"
               >
                 {copiedField === 'token' ? <Check className="w-4 h-4 text-white" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedField === 'token' ? 'تم النسخ!' : 'نسخ الرمز'}</span>
+                <span>نسخ Verify Token</span>
               </button>
               <button
                 type="button"
                 onClick={handleGenerateNewToken}
                 disabled={generatingToken}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
-                title="توليد رمز تحقق عشوائي جديد"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors shrink-0"
+                title="توليد رمز جديد"
               >
                 <RefreshCw className={`w-4 h-4 ${generatingToken ? 'animate-spin text-indigo-400' : ''}`} />
               </button>
             </div>
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="text-slate-400">
-                انسخ هذا الرمز والصقه كما هو في خانة <strong>Verify Token</strong> داخل Meta Developers.
-              </span>
-              <button
-                type="button"
-                onClick={handleGenerateNewToken}
-                className="text-indigo-400 hover:underline flex items-center gap-1"
-              >
-                <Sparkles className="w-3 h-3" />
-                <span>توليد كود جديد</span>
-              </button>
-            </div>
+            <p className="text-[10px] text-slate-400">
+              * Environment Variable: <code className="text-slate-200 font-mono">INSTAGRAM_VERIFY_TOKEN</code>
+            </p>
           </div>
         </div>
 
-        {/* Custom Domain Input for Vercel / External Deployments */}
-        <div className="pt-3 border-t border-slate-800/80">
-          <label className="text-slate-400 text-xs block mb-1">
-            دومين النشر المخصص (إذا كنت نشرت الموقع على Vercel أو دومين خارجي):
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={customDomain}
-              onChange={(e) => setCustomDomain(e.target.value)}
-              placeholder="مثال: https://vexora-automation.vercel.app (اتركه فارغاً لاستخدام الرابط الحالي تلقائياً)"
-              className="flex-1 bg-slate-800/50 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 font-mono"
-            />
-            {customDomain && (
-              <button
-                type="button"
-                onClick={() => setCustomDomain('')}
-                className="px-3 py-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white text-xs border border-slate-700"
-              >
-                إعادة للرابط الحالي
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Webhook Handshake Live Ping Tester */}
-        <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              <span className="text-xs font-bold text-white">
-                أداة الفحص الذاتي للـ Webhook (Webhook Live Ping Tester)
-              </span>
+        {/* Live Webhook Ping Tester (Testing same exact Meta method) */}
+        <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                فحص استجابة الرابط والرمز الآن (Meta Handshake Simulator)
+              </h4>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                يقوم بإرسال GET Request فعلي مع hub.mode=subscribe و hub.verify_token و hub.challenge لفحص النتيجة فوراً
+              </p>
             </div>
 
             <button
               type="button"
-              onClick={handleTestWebhookHandshake}
+              onClick={handleTestWebhookLive}
               disabled={testingWebhook}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-xs flex items-center gap-2 transition-all shadow-md shadow-emerald-600/20 disabled:opacity-50 shrink-0"
             >
               {testingWebhook ? (
                 <>
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>جاري الفحص...</span>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>جاري فحص الـ Webhook...</span>
                 </>
               ) : (
                 <>
-                  <Play className="w-3.5 h-3.5" />
+                  <Play className="w-4 h-4" />
                   <span>فحص استجابة الرابط والرمز الآن</span>
                 </>
               )}
             </button>
           </div>
 
-          <p className="text-[11px] text-slate-400">
-            اضغط هنا للتأكد بنفسك قبل الذهاب إلى فيسبوك من أن السيرفر يستجيب بشكل سليم للرمز الحالي ويرجع الـ challenge المطلوب.
-          </p>
-
-          {webhookTestResult && (
-            <div className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 animate-in fade-in ${
-              webhookTestResult.success 
-                ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300' 
-                : 'bg-rose-950/30 border-rose-500/30 text-rose-300'
+          {/* Test Result Message */}
+          {pingResult.status !== 'idle' && (
+            <div className={`p-3.5 rounded-xl border text-xs space-y-1.5 animate-in fade-in ${
+              pingResult.status === 'success'
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
             }`}>
-              {webhookTestResult.success ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-              ) : (
-                <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-              )}
-              <div className="space-y-1">
-                <div className="font-bold">
-                  {webhookTestResult.success ? 'جاهز 100%! السيرفر متوافق تماماً مع Meta' : 'فشل الفحص'}
-                </div>
-                <div className="text-[11px] opacity-90">{webhookTestResult.message}</div>
-                {webhookTestResult.challengeReturned && (
-                  <div className="font-mono text-[10px] text-slate-400">
-                    Challenge Response: {webhookTestResult.challengeReturned} (HTTP 200 OK)
-                  </div>
+              <div className="flex items-center gap-2 font-bold">
+                {pingResult.status === 'success' ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                ) : (
+                  <XCircle className="w-5 h-5 text-rose-400 shrink-0" />
                 )}
+                <span>{pingResult.message}</span>
               </div>
+              {pingResult.details && (
+                <div className="font-mono text-[11px] text-slate-300 pr-7">
+                  {pingResult.details}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      {/* Meta API Keys Configuration Form */}
+      {/* Meta API Keys Configuration Form (Server-Side Storage Only) */}
       <form onSubmit={handleSave} className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
-        <h3 className="font-bold text-white text-sm flex items-center gap-2">
-          <Key className="w-4 h-4 text-pink-400" />
-          تكوين مفاتيح Meta Graph API
-        </h3>
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold text-white text-sm flex items-center gap-2">
+            <Key className="w-4 h-4 text-pink-400" />
+            مفاتيح وتكوين Meta Graph API (Backend Environment)
+          </h3>
+          <span className="text-[10px] text-slate-400">
+            تُحفظ في السيرفر فقط ولا تظهر للمتصفح
+          </span>
+        </div>
 
-        <div className="space-y-4 text-xs">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div>
             <label className="text-slate-300 block mb-1 font-medium">
-              Instagram Page ID أو Instagram Business Account ID:
+              Instagram Account ID (معرف حساب إنستغرام للأعمال):
             </label>
             <input
               type="text"
-              value={pageId}
-              onChange={(e) => setPageId(e.target.value)}
-              placeholder="مثال: 104829104829104"
+              value={accountId}
+              onChange={(e) => setAccountId(e.target.value)}
+              placeholder="مثال: 17841400000000000"
               className="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-white focus:outline-none focus:border-indigo-500 font-mono"
             />
+            <span className="text-[10px] text-slate-500 mt-1 block">
+              متغير البيئة: <code className="text-slate-400">INSTAGRAM_ACCOUNT_ID</code>
+            </span>
           </div>
 
           <div>
             <label className="text-slate-300 block mb-1 font-medium">
-              Instagram Graph API Permanent User/Page Access Token:
+              Meta App ID:
+            </label>
+            <input
+              type="text"
+              value={appId}
+              onChange={(e) => setAppId(e.target.value)}
+              placeholder="مثال: 987654321098765"
+              className="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-white focus:outline-none focus:border-indigo-500 font-mono"
+            />
+            <span className="text-[10px] text-slate-500 mt-1 block">
+              متغير البيئة: <code className="text-slate-400">META_APP_ID</code>
+            </span>
+          </div>
+        </div>
+
+        <div className="space-y-4 text-xs">
+          <div>
+            <label className="text-slate-300 block mb-1 font-medium">
+              Meta Access Token (رمز وصول إنستغرام الدائم للردود):
             </label>
             <input
               type="password"
               value={accessToken}
               onChange={(e) => setAccessToken(e.target.value)}
-              placeholder={settings?.instagram_access_token_configured ? '•••••••••••••••••••••••••••••••• (مضبوط ومخفي للأمان)' : 'الصق الـ Access Token من Meta App هنا...'}
+              placeholder={settings?.instagram_access_token_configured ? '•••••••••••••••••••••••••••••••• (مضبوط في السيرفر ومخفي للأمان)' : 'الصق META_ACCESS_TOKEN هنا...'}
               className="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-white focus:outline-none focus:border-indigo-500 font-mono"
             />
-            <p className="text-[11px] text-slate-400 mt-1">
-              يتم حفظ التوكن في السيرفر فقط ولا يتم كشفه للواجهة الأمامية منعاً للاختراق.
-            </p>
+            <span className="text-[10px] text-slate-500 mt-1 block">
+              متغير البيئة: <code className="text-slate-400">META_ACCESS_TOKEN</code> (يتطلب صلاحية instagram_manage_messages)
+            </span>
           </div>
         </div>
 
         <div className="flex items-center justify-between pt-2">
           {successMsg && (
-            <span className="text-xs text-emerald-400 font-medium">{successMsg}</span>
+            <span className="text-xs text-emerald-400 font-semibold">{successMsg}</span>
           )}
           <button
             type="submit"
             disabled={saving}
-            className="mr-auto px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50"
+            className="mr-auto px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 transition-colors"
           >
             <Save className="w-4 h-4" />
-            <span>{saving ? 'جاري الحفظ...' : 'حفظ بيانات الربط'}</span>
+            <span>{saving ? 'جاري الحفظ...' : 'حفظ بيانات الربط في السيرفر'}</span>
           </button>
         </div>
       </form>
 
-      {/* Step by Step Visual Guide for Non-Programmers */}
-      <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+      {/* Step by Step Action Plan for Meta Developers */}
+      <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4 text-xs">
         <div className="flex items-center justify-between">
           <h3 className="font-bold text-white text-base">
-            دليل إعداد تطبيق Meta للمستخدم العادي (بدون برمجة)
+            ما الخطوة التي يجب أن تفعلها داخل Meta Developers الآن؟
           </h3>
           <a
             href="https://developers.facebook.com/apps/"
             target="_blank"
             rel="noreferrer"
-            className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-semibold"
+            className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold"
           >
             <span>فتح Meta Developers</span>
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </div>
 
-        <div className="space-y-4 text-xs text-slate-300">
+        <div className="space-y-3 text-slate-300 leading-relaxed">
           <div className="p-3.5 rounded-xl bg-slate-800/40 border border-slate-800 flex items-start gap-3">
             <span className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
               1
             </span>
             <div>
-              <strong className="text-white block text-sm mb-0.5">إنشاء تطبيق جديد في Meta Developers</strong>
-              ادخل على <code className="text-indigo-300">developers.facebook.com</code> ثم اضغط على <strong>Create App</strong>، واختر نوع التطبيق <strong>Business</strong> ثم سمّه <strong>Vexora Instagram AI</strong>.
+              <strong className="text-white block text-sm mb-0.5">افتح صفحة Webhooks في تطبيقك في Meta</strong>
+              من القائمة الجانبية اليسرى اضغط على <strong>Webhooks</strong>، ومن القائمة المنسدلة اختر <strong>Instagram</strong>.
             </div>
           </div>
 
@@ -432,8 +521,22 @@ export const InstagramSetupView: React.FC = () => {
               2
             </span>
             <div>
-              <strong className="text-white block text-sm mb-0.5">إضافة منتج Instagram Graph API</strong>
-              من لوحة التطبيق، ابحث عن <strong>Instagram Graph API</strong> أو <strong>Messenger</strong> واضغط على <strong>Set Up</strong>. تأكد من ربط صفحة فيسبوك المرتبطة بحساب إنستغرام لبراند Vexora.
+              <strong className="text-white block text-sm mb-0.5">اضغط على زر Edit Subscription</strong>
+              ستظهر لك نافذة منبثقة تطلب حقلين:
+              <ul className="list-disc list-inside mt-1.5 space-y-1 text-slate-300">
+                <li>
+                  في خانة <strong>Callback URL</strong>: الصق الرابط:
+                  <div className="p-2 bg-slate-950 rounded-lg font-mono text-indigo-300 text-[11px] my-1">
+                    https://vexora-x.vercel.app/api/instagram/webhook
+                  </div>
+                </li>
+                <li>
+                  في خانة <strong>Verify Token</strong>: الصق رمز التحقق الخاص بك:
+                  <div className="p-2 bg-slate-950 rounded-lg font-mono text-emerald-300 text-[11px] my-1">
+                    {verifyToken}
+                  </div>
+                </li>
+              </ul>
             </div>
           </div>
 
@@ -442,14 +545,8 @@ export const InstagramSetupView: React.FC = () => {
               3
             </span>
             <div>
-              <strong className="text-white block text-sm mb-0.5">ضبط الـ Webhook بالبيانات الموضحة في الأعلى</strong>
-              ادخل على تبويب <strong>Webhooks</strong> في القائمة الجانبية، اختر <strong>Instagram</strong> ثم اضغط <strong>Edit Subscription</strong>:
-              <ul className="list-disc list-inside mt-1.5 space-y-1 text-slate-300">
-                <li>في خانة <strong>Callback URL</strong>: الصق رابط الـ Webhook المنسوخ من المستطيل رقم (1) أعلاه.</li>
-                <li>في خانة <strong>Verify Token</strong>: الصق رمز التحقق المنسوخ من المستطيل رقم (2) أعلاه (<code className="text-emerald-300 font-mono">{verifyToken}</code>).</li>
-                <li>اضغط على <strong>Verify and Save</strong> (سيقوم Meta بالتحقق فورياً وسيعطيك علامة خضراء).</li>
-                <li>بعد الحفظ، فعّل الاشتراك (Subscribe) في حقل <strong>messages</strong> و <strong>messaging_postbacks</strong>.</li>
-              </ul>
+              <strong className="text-white block text-sm mb-0.5">اضغط على زر Verify and Save</strong>
+              سيقوم خادم Meta بإرسال طلب فحص مباشر وسيرد خادم Vercel بنجاح مع HTTP 200 وستظهر علامة صح خضراء فوراً.
             </div>
           </div>
 
@@ -458,18 +555,11 @@ export const InstagramSetupView: React.FC = () => {
               4
             </span>
             <div>
-              <strong className="text-white block text-sm mb-0.5">توليد الـ Access Token</strong>
-              من صفحة إعدادات Instagram، اختر صفحة Vexora واضغط <strong>Generate Token</strong>، انسخ التوكن والصقه في الحقل المخصص أعلاه واضغط حفظ.
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-xl bg-slate-800/40 border border-slate-800 flex items-start gap-3">
-            <span className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
-              5
-            </span>
-            <div>
-              <strong className="text-white block text-sm mb-0.5">تجربة إرسال رسالة حقيقية</strong>
-              الآن أرسل رسالة من أي حساب إنستغرام إلى حساب Vexora، وسيتم استقبالها فوراً، تحليلها بـ Gemini، وإرسال الرد المصري للعميل في خلال ثانية واحدة!
+              <strong className="text-white block text-sm mb-0.5">تفعيل اشتراك الأحداث (Subscribe)</strong>
+              في جدول الأحداث المتاح في نفس الصفحة، اضغط <strong>Subscribe</strong> أمام:
+              <span className="inline-flex gap-1.5 mr-2 font-mono text-indigo-300 font-semibold">
+                [ messages ] [ messaging_postbacks ] [ messaging_seen ] [ messaging_reactions ] [ comments ] [ mentions ]
+              </span>
             </div>
           </div>
         </div>

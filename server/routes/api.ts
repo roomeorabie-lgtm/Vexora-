@@ -12,38 +12,57 @@ export const apiRouter = express.Router();
 // 1. META INSTAGRAM WEBHOOK ENDPOINTS
 // ==========================================
 
-/**
- * Meta Webhook Verification Handshake
- * GET /api/webhook/instagram
- */
-apiRouter.get('/webhook/instagram', (req: Request, res: Response) => {
+const handleWebhookGet = (req: Request, res: Response) => {
   const mode = req.query['hub.mode'] as string;
   const token = req.query['hub.verify_token'] as string;
   const challenge = req.query['hub.challenge'] as string;
 
   const result = InstagramIntegration.verifyWebhook(mode, token, challenge);
   if (result.success && result.challenge) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(200).send(result.challenge);
   }
-  return res.status(403).send('Verification token mismatch or invalid request');
-});
+  return res.status(403).send(result.error || 'Verification token mismatch or invalid request');
+};
 
-/**
- * Meta Webhook Incoming Event Receiver
- * POST /api/webhook/instagram
- */
-apiRouter.post('/webhook/instagram', async (req: Request, res: Response) => {
+const handleWebhookPost = async (req: Request, res: Response) => {
   try {
-    const payload = req.body;
-    // Meta requires an immediate 200 OK acknowledgment to prevent retries
+    // 1. Signature Verification with META_APP_SECRET
+    const signature = req.headers['x-hub-signature-256'] as string;
+    const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
+    const isSignatureValid = InstagramIntegration.verifySignature(rawBody, signature);
+
+    if (!isSignatureValid) {
+      return res.status(403).send('Invalid signature');
+    }
+
+    // 2. Meta requires immediate 200 OK acknowledgment to avoid timeout & retries
     res.status(200).send('EVENT_RECEIVED');
 
-    // Asynchronously process the payload through the automation pipeline
-    await InstagramIntegration.handleWebhookPayload(payload);
+    // 3. Process events asynchronously without blocking the Meta response
+    const payload = req.body;
+    InstagramIntegration.handleWebhookPayload(payload).catch((err) => {
+      console.error('Async webhook processing error:', err);
+    });
   } catch (err: any) {
-    console.error('Error handling Meta webhook POST payload:', err);
+    console.error('Error in Meta webhook POST handler:', err);
+    if (!res.headersSent) {
+      res.status(200).send('EVENT_RECEIVED');
+    }
   }
-});
+};
+
+/**
+ * Primary Meta Webhook Endpoint: /api/instagram/webhook
+ */
+apiRouter.get('/instagram/webhook', handleWebhookGet);
+apiRouter.post('/instagram/webhook', handleWebhookPost);
+
+/**
+ * Backward compatibility alias: /api/webhook/instagram
+ */
+apiRouter.get('/webhook/instagram', handleWebhookGet);
+apiRouter.post('/webhook/instagram', handleWebhookPost);
 
 // ==========================================
 // 2. DASHBOARD STATS
