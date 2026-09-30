@@ -1,0 +1,6 @@
+{
+  "name": "Vexora AI Automation",
+  "description": "نظام أتمتة متكامل بالذكاء الاصطناعي لبراند Vexora لإدارة رسائل Instagram وتصنيف العملاء والرد باللهجة المصرية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
