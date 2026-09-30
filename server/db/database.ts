@@ -486,6 +486,11 @@ export class Database {
   // ------------------ SYSTEM SETTINGS ------------------
   getSystemSettings(): SystemSettings {
     const current = { ...this.state.system_settings };
+    if (!current.instagram_verify_token || !current.instagram_verify_token.trim()) {
+      current.instagram_verify_token = process.env.INSTAGRAM_VERIFY_TOKEN || 'vexora_secure_webhook_token_2026';
+      this.state.system_settings.instagram_verify_token = current.instagram_verify_token;
+      this.saveState();
+    }
     current.instagram_access_token_configured = Boolean(
       process.env.INSTAGRAM_ACCESS_TOKEN || current.instagram_access_token
     );
@@ -493,6 +498,14 @@ export class Database {
       process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
     );
     return current;
+  }
+
+  generateVerifyToken(): string {
+    const newToken = `vexora_token_${crypto.randomBytes(8).toString('hex')}`;
+    this.state.system_settings.instagram_verify_token = newToken;
+    this.state.system_settings.updated_at = new Date().toISOString();
+    this.saveState();
+    return newToken;
   }
 
   updateSystemSettings(updates: Partial<SystemSettings>): SystemSettings {

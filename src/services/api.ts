@@ -231,6 +231,22 @@ export const api = {
     return res.json();
   },
 
+  async generateVerifyToken(): Promise<{ token: string; settings: SystemSettings }> {
+    const res = await fetch(`${BASE_URL}/system-settings/generate-token`, { method: 'POST' });
+    if (!res.ok) throw new Error('فشل توليد رمز التحقق الجديد');
+    return res.json();
+  },
+
+  async testWebhookHandshake(token: string): Promise<any> {
+    const res = await fetch(`${BASE_URL}/system-settings/test-webhook-handshake`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
+    });
+    if (!res.ok) throw new Error('فشل اختبار الـ Webhook');
+    return res.json();
+  },
+
   // Logs
   async getLogs(limit = 100): Promise<AutomationLog[]> {
     const res = await fetch(`${BASE_URL}/logs?limit=${limit}`);

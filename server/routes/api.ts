@@ -545,6 +545,48 @@ apiRouter.put('/system-settings', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Generate a new cryptographically secure Verify Token
+ */
+apiRouter.post('/system-settings/generate-token', (_req: Request, res: Response) => {
+  try {
+    const newToken = db.generateVerifyToken();
+    const settings = db.getSystemSettings();
+    res.json({
+      token: newToken,
+      settings: {
+        ...settings,
+        instagram_access_token: settings.instagram_access_token ? '••••••••••••••••••••••••••••••••' : ''
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Live test of webhook handshake endpoint
+ */
+apiRouter.post('/system-settings/test-webhook-handshake', (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    const testChallenge = `challenge_${Math.floor(Math.random() * 1000000)}`;
+    const verification = InstagramIntegration.verifyWebhook('subscribe', token, testChallenge);
+
+    res.json({
+      success: verification.success,
+      challengeReturned: verification.challenge,
+      expectedToken: db.getSystemSettings().instagram_verify_token,
+      testedToken: token,
+      message: verification.success 
+        ? 'تم التحقق بنجاح! السيرفر رد بالـ challenge ومستعد لاستقبال مكالمة Meta Webhook.' 
+        : 'فشل التحقق: الرمز المرسل لا يطابق الرمز المسجل في السيرفر.'
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==========================================
 // 10. SYSTEM & AUTOMATION LOGS
 // ==========================================
